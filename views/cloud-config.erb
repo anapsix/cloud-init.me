@@ -1,0 +1,267 @@
+#cloud-config
+
+hostname: <%= hostname %>.<%= domain %>
+
+coreos:
+  etcd:
+    name: <%= hostname %>
+    discovery: <%= etcd_discovery_url %>
+    addr: <%= public_ip %>:4001
+    bind_addr: 0.0.0.0:4001
+    peer-addr: <%= public_ip %>:7001
+    peer-bind_addr: 0.0.0.0:7001
+  fleet:
+    public-ip: <%= public_ip %>
+    <%- if defined?(metadata) -%>
+    metadata: #{metadata}
+    <% end %>
+  update:
+    reboot-strategy: etcd-lock
+  units:
+    - name: etcd.service
+      command: start
+      content: |
+        [Unit]
+        Description=etcd
+
+        [Service]
+        Environment=ETCD_DISCOVERY_URL=<%= etcd_discovery_url %>
+        TimeoutStartSec=20m
+        ExecStartPre=bin/sh -c "docker history anapsix/etcd || docker pull anapsix/etcd"
+        ExecStart=/opt/bin/start_etcd.sh
+        ExecStop=/usr/bin/docker stop -t 2 etcd
+        ExecStopPost=-/usr/bin/docker rm -f etcd
+        Restart=always
+        RestartSec=30s
+        LimitNOFILE=40000
+    - name: upgrade-fleet-091.service
+      command: start
+      content: |
+        [Unit]
+        Description=Upgrade fleet if system fleet is v0.9.1, which has a known bug
+        Before=fleet.service
+        ConditionPathIsSymbolicLink=!/etc/systemd/system/fleet.service.d/99-upgrade-fleet-091.conf
+
+        [Service]
+        ExecStart=/usr/bin/bash -c 'if fleetd --version | grep -q 0.9.1; then curl -sSL --retry 5 --retry-delay 2 -o /run/deis/bin/fleetd-0.9.2 https://s3-us-west-2.amazonaws.com/opdemand/fleetd-v0.9.2 && chmod +x /run/deis/bin/fleetd-0.9.2 && mkdir -p /etc/systemd/system/fleet.service.d/ && ln -s /run/deis/conf/fleetd-092-custom-binary.conf /etc/systemd/system/fleet.service.d/99-upgrade-fleet-091.conf; else rm -f /etc/systemd/system/fleet.service.d/99-upgrade-fleet-091.conf; fi'
+        RemainAfterExit=yes
+        Type=oneshot
+    - name: stop-update-engine.service
+      command: start
+      content: |
+        [Unit]
+        Description=stop update-engine
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/bin/systemctl stop update-engine.service
+        ExecStartPost=/usr/bin/systemctl mask update-engine.service
+    - name: ntpdate.service
+      command: start
+    - name: timedate-ntp-synchronization.service
+      command: start
+      content: |
+        [Unit]
+        Description=Synchronize system clock
+        After=ntpdate.service
+
+        [Service]
+        ExecStart=/usr/bin/timedatectl set-timezone UTC
+        ExecStart=/usr/bin/timedatectl set-ntp true
+        ExecStart=/sbin/hwclock --systohc --utc
+        RemainAfterExit=yes
+        Type=oneshot
+    - name: debug-etcd.service
+      content: |
+        [Unit]
+        Description=etcd debugging service
+
+        [Service]
+        ExecStartPre=/usr/bin/curl -sSL -o /opt/bin/jq http://stedolan.github.io/jq/download/linux64/jq
+        ExecStartPre=/usr/bin/chmod +x /opt/bin/jq
+        ExecStart=/usr/bin/bash -c "while true; do curl -sL http://127.0.0.1:4001/v2/stats/leader | /opt/bin/jq . ; sleep 1 ; done"
+    - name: increase-nf_conntrack-connections.service
+      command: start
+      content: |
+        [Unit]
+        Description=Increase the number of connections in nf_conntrack. default is 65536
+
+        [Service]
+        Type=oneshot
+        ExecStartPre=/usr/sbin/modprobe nf_conntrack
+        ExecStart=/bin/sh -c "sysctl -w net.netfilter.nf_conntrack_max=262144"
+    - name: load-overlay-module.service
+      command: start
+      content: |
+        [Unit]
+        Description=Load overlay module before docker start
+        Before=docker.service
+
+        [Service]
+        ExecStart=/bin/bash -c "lsmod | grep overlay || modprobe overlay"
+    - name: fleet.service
+      command: start
+
+  write_files:
+    - path: /etc/environment
+      content: |
+        COREOS_PUBLIC_IPV4=<%= public_ip %>
+        COREOS_PRIVATE_IPV4=<%= private_ip %>
+    - path: /run/deis/bin/get_image
+      permissions: '0755'
+      content: |
+        #!/bin/bash
+        # usage: get_image <component_path>
+        IMAGE=`etcdctl get $1/image 2>/dev/null`
+
+        # if no image was set in etcd, we use the default plus the release string
+        if [ $? -ne 0 ]; then
+          RELEASE=`etcdctl get /deis/platform/version 2>/dev/null`
+
+          # if no release was set in etcd, use the default provisioned with the server
+          if [ $? -ne 0 ]; then
+            source /etc/deis-release
+            RELEASE=$DEIS_RELEASE
+          fi
+
+          IMAGE=$1:$RELEASE
+        fi
+
+        # remove leading slash
+        echo ${IMAGE#/}
+    - path: /run/deis/bin/preseed
+      permissions: '0755'
+      content: |
+        #!/bin/bash
+
+        COMPONENTS=(builder cache controller database logger logspout publisher registry router store-daemon store-gateway store-metadata store-monitor)
+        for c in "${COMPONENTS[@]}"; do
+          image=`/run/deis/bin/get_image /deis/$c`
+          docker history $image >/dev/null 2>&1 || docker pull $image
+        done
+    - path: /opt/bin/deis-debug-logs
+      permissions: '0755'
+      content: |
+        #!/bin/bash
+
+        echo '--- VERSIONS ---'
+        source /etc/os-release
+        echo $PRETTY_NAME
+        source /etc/deis-release
+        echo "Deis $DEIS_RELEASE"
+        etcd -version
+        fleet -version
+        printf "\n"
+
+        echo '--- SYSTEM STATUS ---'
+        journalctl -n 50 -u etcd --no-pager
+        journalctl -n 50 -u fleet --no-pager
+        printf "\n"
+
+        echo '--- DEIS STATUS ---'
+        deisctl list
+        etcdctl ls --recursive /deis
+        printf "\n"
+    - path: /opt/bin/start_etcd.sh
+      permissions: '0755'
+      content: |
+        #!/bin/bash
+        # example script to start a single node ETCD cluster on localhost
+
+        HOSTNAME="$(hostname -s)"
+        LISTEN_ADDRESS=$(ip -4 -o a s enp2s0f1 | awk '{ print $4 | "cut -d/ -f1"}')
+
+        ETCD_DISCOVERY_URL=${ETCD_DISCOVERY_URL:-}
+        ETCD_CLUSTER_TOKEN="${ETCD_CLUSTER_TOKEN:-cluster-$[${RANDOM%100000}+10000]}"
+        ETCD_INITIAL_CLUSTER="${ETCD_INITIAL_CLUSTER:-${HOSTNAME:-localhost}=http://${LISTEN_ADDRESS}:7001}"
+        ETCD_INITIAL_CLUSTER_STATE=${ETCD_INITIAL_CLUSTER_STATE:-existing}
+
+        DOCKER_LISTEN_ADDRESS=${DOCKER_LISTEN_ADDRESS:-}
+
+        if [ "$ETCD_DISCOVERY_URL" ];
+        then
+          DISCOVERY_MECHANISM="--discovery ${ETCD_DISCOVERY_URL}"
+        else
+          DISCOVERY_MECHANISM="--initial-cluster '${ETCD_INITIAL_CLUSTER}' --initial-cluster-state ${ETCD_INITIAL_CLUSTER_STATE} --initial-cluster-token ${ETCD_CLUSTER_TOKEN}"
+        fi
+
+        DOCKER_NAME="etcd"
+
+        if [ -n "${DATA_DIR}"  ] && [ ! -d ${DATA_DIR} ]
+        then
+          mkdir ${DATA_DIR} || exit 1
+        fi
+
+        start_container() {
+        docker run -d \
+          --name ${DOCKER_NAME:-etcd} \
+          -p ${DOCKER_LISTEN_ADDRESS:+$DOCKER_LISTEN_ADDRESS:}7001:7001 \
+          -p ${DOCKER_LISTEN_ADDRESS:+$DOCKER_LISTEN_ADDRESS:}4001:4001 \
+          ${DATA_DIR:+-v ${DATA_DIR}:/data} \
+          anapsix/etcd --name "${HOSTNAME:-localhost}" --initial-advertise-peer-urls "http://${LISTEN_ADDRESS}:7001" --listen-peer-urls "http://0.0.0.0:7001" --listen-client-urls "http://0.0.0.0:4001" --advertise-client-urls http://${LISTEN_ADDRESS}:4001 ${DISCOVERY_MECHANISM}
+        }
+
+        check_container_status() {
+          _container="$1"
+          status=$(docker inspect -f '{{ .State.Running }}' ${_container} 2>/dev/null)
+          if [ $? != 0 ]
+          then
+            echo na
+            return 1
+          fi
+          echo $status
+          unset _container
+        }
+
+        if [[ $(check_container_status ${DOCKER_NAME:-etcd}) == ?(true|false) ]]
+        then
+          echo "ERROR: Container with name \"${DOCKER_NAME:-etcd}\" exists." >&2
+          echo "ERROR: Cannot start another one with the same name, exiting.." >&2
+          echo "ERROR: You can FORCE remove it with \"docker rm -f etcd\"." >&2
+          exit 1
+        fi
+
+        DOCKER_CID=$(start_container)
+        echo "WARNING: ETCD container started, tailing the logs.."
+        echo "WARNING: use [CTRL-C] to exit.. container should continue running.."
+        docker logs -f $DOCKER_CID
+
+        if [[ "$(check_container_status $DOCKER_CID)" == "true" ]]
+        then
+          echo >&2
+          echo "WARNING: ETCD container is still running with CID=${DOCKER_CID:0:12}" >&2
+        else
+          echo >&2
+          echo "WARNING: ETCD container is not running, CID=${DOCKER_CID:0:12}" >&2
+        fi
+    - path: /etc/profile.d/nse-function.sh
+      permissions: '0755'
+      content: |
+        function nse() {
+          docker exec -it $1 bash
+        }
+    - path: /etc/systemd/system/docker.service.d/50-insecure-registry.conf
+      content: |
+        [Service]
+        EnvironmentFile=/etc/environment_proxy
+        Environment="DOCKER_OPTS=--insecure-registry 10.0.0.0/8 --insecure-registry 172.16.0.0/12 --insecure-registry 192.168.0.0/16 --insecure-registry 100.64.0.0/10"
+    - path: /home/core/.toolboxrc
+      owner: core
+      content: |
+        TOOLBOX_DOCKER_IMAGE=ubuntu-debootstrap
+        TOOLBOX_DOCKER_TAG=14.04
+        TOOLBOX_USER=root
+    - path: /etc/systemd/coredump.conf
+      content: |
+        [Coredump]
+        Storage=none
+    - path: /etc/systemd/system/ntpd.service.d/debug.conf
+      content: |
+        [Service]
+        ExecStart=
+        ExecStart=/usr/sbin/ntpd -g -n -f /var/lib/ntp/ntp.drift
+    - path: /run/deis/conf/fleetd-092-custom-binary.conf
+      content: |
+        [Service]
+        ExecStart=
+        ExecStart=/run/deis/bin/fleetd-0.9.2
