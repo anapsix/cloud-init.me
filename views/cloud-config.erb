@@ -12,9 +12,7 @@ coreos:
     peer-bind_addr: 0.0.0.0:7001
   fleet:
     public-ip: <%= public_ip %>
-    <%- if defined?(metadata) -%>
-    metadata: #{metadata}
-    <% end %>
+<%= "    metadata: #{metadata}\n" if defined?(metadata) -%>
   update:
     reboot-strategy: etcd-lock
   units:

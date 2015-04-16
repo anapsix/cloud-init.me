@@ -1,11 +1,12 @@
 ---
-- mike:
+:mike:
   :hostname: mike
   :domain: cloud-init.com
   :public_ip: 217.70.184.101
   :private_ip: 10.0.0.101
   :etcd_discovery_url: 'https://discovery.etcd.io/e18fd299d818fe876d86adc7cc639417'
-- bill:`
+  :metadata: "location=ec2-east1"
+:bill:
   :hostname: bill
   :domain: cloud-init.com
   :public_ip: 217.70.184.102
