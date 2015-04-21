@@ -1,14 +1,27 @@
 ---
-:mike:
-  :hostname: mike
+defaults: &defaults
   :domain: cloud-init.com
-  :public_ip: 217.70.184.101
-  :private_ip: 10.0.0.101
   :etcd_discovery_url: 'https://discovery.etcd.io/e18fd299d818fe876d86adc7cc639417'
   :metadata: "location=ec2-east1"
-:bill:
-  :hostname: bill
-  :domain: cloud-init.com
+
+:nick:
+  <<: *defaults
+  :hostname: nick
+  :public_ip: 217.70.184.101
+  :private_ip: 10.0.0.101
+
+:mike:
+  <<: *defaults
+  :hostname: mike
   :public_ip: 217.70.184.102
   :private_ip: 10.0.0.102
-  :etcd_discovery_url: 'https://discovery.etcd.io/e18fd299d818fe876d86adc7cc639417'
+  :metadata: "location=ec2-west1"
+
+:bill:
+  <<: *defaults
+  :hostname: bill
+  :domain: cloid-init.me
+  :public_ip: 217.70.184.103
+  :private_ip: 10.0.0.103
+  :metadata: "location=do-ny2"
+

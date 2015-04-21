@@ -29,7 +29,11 @@ end
 Cuba.define do
 
   # load config
-  @config = YAML.load_file(File.expand_path("../config/host.yml",__FILE__))
+  @config = begin
+    YAML.load_file(File.expand_path("../config/host.yml",__FILE__))
+  rescue ArgumentError => e
+    puts "Could not parse YAML: #{e.message}"
+  end
 
   on get do
 
@@ -43,7 +47,14 @@ Cuba.define do
     # /:host
     on ":host" do |host|
       warn "serving #{host}"
-      res.write auto_wrap(partial("cloud-config", @config[host.to_sym]))
+      warn "@config #{@config.class}"
+      unless @config.has_key?(host.to_sym)
+        res.status = 404
+        res.write "#### no config for \"#{host}\" host ####"
+        res.finish
+      else
+        res.write auto_wrap(partial("cloud-config", @config[host.to_sym]))
+      end
     end
 
 
