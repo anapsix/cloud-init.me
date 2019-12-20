@@ -5,7 +5,7 @@ GEM
       timers (~> 4.0.0)
     cuba (3.4.0)
       rack
-    ffi (1.9.8)
+    ffi (1.11.3)
     hitimes (1.2.2)
     listen (2.10.0)
       celluloid (~> 0.16.0)
